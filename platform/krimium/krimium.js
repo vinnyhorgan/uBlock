@@ -693,7 +693,7 @@ const commit = (tabId, url, early = false) => {
 };
 
 // A frame has a new document: what lived in the one before is gone.
-const frame = (tabId, frameId, parentFrameId, url) => {
+const frame = (tabId, frameId, parentFrameId, url, blank = false) => {
     const tab = tabs.get(tabId);
     if ( tab === undefined ) { return; }
     if ( frameId === 0 ) {
@@ -701,13 +701,16 @@ const frame = (tabId, frameId, parentFrameId, url) => {
         return;
     }
     dropPorts(tabId, frameId);
+    // A frame without an address of its own (about:blank, about:srcdoc)
+    // has its page's, and was asked for by no request.
     for ( const [ id, early ] of tab.frames ) {
+        if ( blank ) { break; }
         if ( early.early && early.url === url ) {
             tab.frames.delete(id);
             break;
         }
     }
-    tab.frames.set(frameId, { url, parentFrameId });
+    tab.frames.set(frameId, { url, parentFrameId, blank });
     navigationEvents.onCommitted.emit({
         tabId, frameId, parentFrameId, url,
         transitionType: 'auto_subframe', transitionQualifiers: [],
@@ -717,21 +720,23 @@ const frame = (tabId, frameId, parentFrameId, url) => {
 
 // Styles go in as user style sheets, to a frame, or to the frames of a
 // subframe's scheme and host: WebKit gives a sheet to frames by their
-// address.
+// address. A frame without one of its own also gets them as one of the
+// frames that have none ("about:"), and keeps them if a document.write()
+// gives it its page's.
 const styleDetails = (tabId, details) => {
     const tab = tabs.get(tabId);
     const frameId = details.frameId ?? 0;
-    let pattern = '';
-    if ( frameId !== 0 ) {
-        try {
-            const url = new URL(tab.frames.get(frameId).url);
-            if ( /^https?:$/.test(url.protocol) === false ) { return; }
-            pattern = `${url.protocol}//${url.hostname}/*`;
-        } catch {
-            return;
-        }
+    const code = details.code || '';
+    if ( frameId === 0 ) { return [ { tabId, frameId, pattern: '', code } ]; }
+    const frame = tab?.frames.get(frameId);
+    let url;
+    try { url = new URL(frame.url); } catch { return []; }
+    if ( /^https?:$/.test(url.protocol) === false ) { return []; }
+    const styles = [ { tabId, frameId, pattern: `${url.protocol}//${url.hostname}/*`, code } ];
+    if ( frame.blank ) {
+        styles.push({ tabId, frameId, pattern: 'about:', code });
     }
-    return { tabId, frameId, pattern, code: details.code || '' };
+    return styles;
 };
 
 const executeScript = async (tabId, details) => {
@@ -1003,16 +1008,12 @@ self.chrome = {
         remove: api(tabIds => native({ type: 'tabs.remove', tabIds: [ tabIds ].flat() })),
         move: api(( ) => {}),
         executeScript: api(executeScript),
-        insertCSS: api((tabId, details) => {
-            const style = styleDetails(tabId, details);
-            if ( style === undefined ) { return; }
-            return native({ type: 'tabs.insertCSS', ...style });
-        }),
-        removeCSS: api((tabId, details) => {
-            const style = styleDetails(tabId, details);
-            if ( style === undefined ) { return; }
-            return native({ type: 'tabs.removeCSS', ...style });
-        }),
+        insertCSS: api((tabId, details) => Promise.all(styleDetails(tabId, details).map(
+            style => native({ type: 'tabs.insertCSS', ...style })
+        ))),
+        removeCSS: api((tabId, details) => Promise.all(styleDetails(tabId, details).map(
+            style => native({ type: 'tabs.removeCSS', ...style })
+        ))),
         sendMessage: api(( ) => {}),
         ...tabsEvents,
     },
