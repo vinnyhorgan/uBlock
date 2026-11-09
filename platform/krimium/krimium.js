@@ -868,9 +868,9 @@ const getMessage = (name, substitutions) => {
 };
 
 // What uBO sets of the browser's privacy. Hyperlink auditing is done here:
-// when uBO turns it off, an <a ping> is cancelled (request()). WebKit does
-// the rest in the first place: it predicts nothing, and krimium has no
-// WebRTC.
+// when uBO turns it off, an <a ping> is cancelled (request()). krimium has
+// no WebRTC. Network prediction is WebKit's: it fetches nothing ahead, but
+// opens the connections a page hints at (rel=preconnect), switch or not.
 const privacySetting = (value, onChange) => {
     const initial = value;
     return {
