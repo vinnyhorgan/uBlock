@@ -25,6 +25,10 @@
 // `krimiumBridge` there before any of them runs: post() carries a string to
 // uBO's background page, and krimium calls receive() with what comes back.
 // A port is runtime.connect()'s, as Chromium has it.
+//
+// uBO's own pages (its popup, dashboard, logger, picker) get this too, in
+// their own world, with what else they use: the manifest and the messages,
+// which krimium hands over as `krimiumBridge.page`.
 
 'use strict';
 
@@ -117,13 +121,48 @@ self.addEventListener('pageshow', ev => {
     if ( self === self.top ) { bridge.restored(); }
 });
 
-self.chrome = self.browser = {
+const { manifest = {}, messages = {} } = bridge.page ?? {};
+
+const getMessage = (name, substitutions) => {
+    const entry = messages[name];
+    if ( entry === undefined ) { return ''; }
+    const subs = substitutions === undefined ? [] : [ substitutions ].flat().map(String);
+    const placeholders = entry.placeholders || {};
+    return entry.message
+        .replace(/\$([A-Za-z0-9_@]+)\$/g, (all, key) => {
+            const placeholder = placeholders[key.toLowerCase()];
+            return placeholder !== undefined ? placeholder.content : all;
+        })
+        .replace(/\$(\d)/g, (all, n) => subs[n - 1] ?? '')
+        .replace(/\$\$/g, '$');
+};
+
+const chrome = self.chrome = self.browser = {
     runtime: {
         id: 'krimium-ubo',
         lastError: undefined,
         connect,
+        getManifest: ( ) => manifest,
         getURL: path => `krimium-ubo://ubo/${String(path).replace(/^\//, '')}`,
     },
+    i18n: {
+        getMessage,
+        getUILanguage: ( ) => navigator.language,
+    },
 };
+
+// uBO's pages import webext.js with what they use (broadcast.js), and it
+// wraps these when it loads: there, nothing calls them.
+if ( bridge.page ) {
+    for ( const name of [ 'alarms', 'browserAction', 'contextMenus', 'tabs', 'webNavigation', 'windows' ] ) {
+        chrome[name] = {};
+    }
+    chrome.storage = { local: {} };
+    chrome.privacy = {
+        network: { networkPredictionEnabled: {}, webRTCIPHandlingPolicy: {} },
+        websites: { hyperlinkAuditingEnabled: {} },
+    };
+    chrome.webRequest = { MAX_HANDLER_BEHAVIOR_CHANGED_CALLS_PER_10_MINUTES: 20 };
+}
 
 })();

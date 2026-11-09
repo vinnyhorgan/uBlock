@@ -203,6 +203,43 @@ const idbStorage = name => {
     };
 };
 
+// krimium's first lists: uBO's own, and what a careful Firefox user adds to
+// them, which is what krimium means by uBO "on the best settings". The
+// first time uBO looks for the lists it has selected, there are none, and
+// it would pick its own: krimium picks them, as that user would tick them
+// in the dashboard, which changes them as anywhere else.
+const firstLists = [
+    'adguard-spyware-url',      // AdGuard/uBO – URL Tracking Protection
+    'curben-phishing',          // Phishing URL Blocklist
+    'block-lan',                // Block Outsider Intrusion into LAN
+    'fanboy-cookiemonster',     // EasyList – Cookie Notices
+    'ublock-cookies-easylist',  // uBlock filters – Cookie Notices
+    'ublock-annoyances',        // uBlock filters – Annoyances
+    'ITA-0',                    // EasyList Italy
+];
+
+const withFirstLists = storage => {
+    const get = storage.get;
+    storage.get = api(async keys => {
+        const out = await get(keys);
+        const asked = typeof keys === 'string' ? [ keys ]
+            : Array.isArray(keys) ? keys : [];
+        if ( asked.includes('selectedFilterLists') === false ) { return out; }
+        if ( Array.isArray(out.selectedFilterLists) ) { return out; }
+        const assets = await fetch(`${root}assets/assets.json`).then(r => r.json());
+        const selected = [ 'user-filters' ];
+        for ( const [ key, entry ] of Object.entries(assets) ) {
+            if ( entry.content !== 'filters' ) { continue; }
+            if ( entry.off === true && firstLists.includes(key) === false ) { continue; }
+            selected.push(key);
+        }
+        await storage.set({ selectedFilterLists: selected });
+        out.selectedFilterLists = selected;
+        return out;
+    });
+    return storage;
+};
+
 const memoryStorage = ( ) => {
     const map = new Map();
     return {
@@ -417,10 +454,14 @@ const request = (tabId, dest, method, url, referrer) => {
         timeStamp: Date.now(),
     };
     if ( dest === 'krimium-scriptlets' ) {
+        if ( method === 'top' ) { commit(tabId, url, true); }
         return self.krimium.scriptlets?.(url, referrer) ?? '';
     }
     if ( dest === 'krimium-content' ) {
         return contentScripts;
+    }
+    if ( dest === 'krimium-page' ) {
+        return `s ${JSON.stringify({ manifest, messages })}`;
     }
     if ( dest === 'ping' && hyperlinkAuditing === false ) {
         return 'c';
@@ -558,6 +599,26 @@ const portMessage = (tabId, frameId, url, data) => {
     }
 };
 
+let krimiumPort;
+
+// The main frame has a new document. krimium's module in the page's process
+// says so first, on the way the page's requests come, before any of them:
+// the browser's word comes later, and is then only news.
+const commit = (tabId, url, early = false) => {
+    const tab = tabs.get(tabId);
+    if ( tab === undefined ) { return; }
+    tab.committed = early ? url : undefined;
+    tab.url = url;
+    tab.status = 'loading';
+    tab.frames.clear();
+    navigationEvents.onCommitted.emit({
+        tabId, frameId: 0, parentFrameId: -1, url,
+        transitionType: 'link', transitionQualifiers: [],
+        timeStamp: Date.now(),
+    });
+    tabsEvents.onUpdated.emit(tabId, { status: 'loading', url }, tabInfo(tab));
+};
+
 // A frame has a new document: what lived in the one before is gone.
 const frame = (tabId, frameId, parentFrameId, url) => {
     const tab = tabs.get(tabId);
@@ -626,6 +687,29 @@ self.krimium = {
     request,
     port: portMessage,
     frame,
+    // A page that is no tab (uBO's popup) went away.
+    gone(tabId) {
+        dropPorts(tabId);
+    },
+    // krimium's own commands: uBO's picker and zapper in a tab, as its
+    // popup launches them.
+    tool(tabId, name) {
+        if ( krimiumPort === undefined ) {
+            krimiumPort = {
+                name: 'krimium',
+                sender: { frameId: 0, url: root + 'popup-fenix.html', origin: root.slice(0, -1) },
+                onMessage: new Event(),
+                onDisconnect: new Event(),
+                postMessage( ) {},
+                disconnect( ) {},
+            };
+            onConnect.emit(krimiumPort);
+        }
+        krimiumPort.onMessage.emit({
+            channel: 'default',
+            msg: { what: 'launchElementPicker', tabId, zap: name === 'zapper' },
+        }, krimiumPort);
+    },
 
     tabCreated(details) {
         const tab = addTab(details);
@@ -666,15 +750,11 @@ self.krimium = {
     committed(tabId, url) {
         const tab = tabs.get(tabId);
         if ( tab === undefined ) { return; }
-        tab.url = url;
-        tab.status = 'loading';
-        tab.frames.clear();
-        navigationEvents.onCommitted.emit({
-            tabId, frameId: 0, parentFrameId: -1, url,
-            transitionType: 'link', transitionQualifiers: [],
-            timeStamp: Date.now(),
-        });
-        tabsEvents.onUpdated.emit(tabId, { status: 'loading', url }, tabInfo(tab));
+        if ( tab.committed === url ) {
+            tab.committed = undefined;
+            return;
+        }
+        commit(tabId, url);
     },
     loaded(tabId) {
         const tab = tabs.get(tabId);
@@ -795,7 +875,7 @@ self.chrome = {
         onUpdateAvailable: new Event(),
     },
     storage: {
-        local: idbStorage('local'),
+        local: withFirstLists(idbStorage('local')),
         session: memoryStorage(),
         onChanged: new Event(),
     },
