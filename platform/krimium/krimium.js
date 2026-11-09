@@ -25,7 +25,8 @@
 //
 // krimium calls in through `self.krimium`:
 //   - request(): every network request of every page, before it leaves,
-//     answered at once: '' (let it go), 'c' (cancel) or 'r URL' (redirect);
+//     answered with '' (let it go), 'c' (cancel) or 'r URL' (redirect), at
+//     once or, when uBO must first resolve the hostname, with a promise;
 //   - tab*(), navigating(), committed(), loaded(), frame(): what its tabs
 //     do;
 //   - port(): what uBO's content scripts in a page post to it.
@@ -436,21 +437,30 @@ const request = (tabId, dest, method, url, referrer) => {
             const frameId = frameOf(tab, referrer);
             details.frameId = frameId;
             details.parentFrameId = frameId === 0 ? -1 : tab.frames.get(frameId).parentFrameId;
-            if ( frameId !== 0 ) {
-                details.documentUrl = tab.frames.get(frameId).url;
-            }
+            details.documentUrl = frameId !== 0 ? tab.frames.get(frameId).url : tab.url;
         }
     } else if ( referrer ) {
         details.documentUrl = referrer;
     }
-    let redirectUrl;
+    // A listener may answer later, with a promise, as on Firefox: then so
+    // does this, and the request waits.
+    const results = [];
     for ( const { fn, filter } of webRequestEvents.onBeforeRequest.listeners.slice() ) {
         if ( filter !== undefined ) {
             if ( Array.isArray(filter.types) && filter.types.includes(type) === false ) { continue; }
             if ( urlMatches(url, filter.urls) === false ) { continue; }
         }
-        let result;
-        try { result = fn(Object.assign({}, details)); } catch (ex) { console.error(ex); }
+        try { results.push(fn(Object.assign({}, details))); } catch (ex) { console.error(ex); }
+    }
+    if ( results.some(r => r instanceof Promise) ) {
+        return Promise.all(results.map(r => Promise.resolve(r).catch(( ) => {}))).then(verdict);
+    }
+    return verdict(results);
+};
+
+const verdict = results => {
+    let redirectUrl;
+    for ( const result of results ) {
         if ( result instanceof Object === false ) { continue; }
         if ( result.cancel === true ) { return 'c'; }
         if ( typeof result.redirectUrl === 'string' && redirectUrl === undefined ) {
@@ -733,6 +743,14 @@ self.chrome = {
         remove: api(( ) => {}),
         removeAll: api(( ) => {}),
         onClicked: new Event(),
+    },
+    // As Firefox has it: krimium resolves the name.
+    dns: {
+        resolve: api(async (hostname, flags) => {
+            const record = await native({ type: 'dns.resolve', hostname });
+            if ( record instanceof Object === false ) { throw `${hostname}: not found`; }
+            return record;
+        }),
     },
     i18n: {
         getMessage,
