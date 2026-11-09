@@ -21,11 +21,13 @@
 
 /******************************************************************************/
 
-// krimium: Chromium's network layer, run by WebKit (WebKitGTK). Lists see
-// the engine they filter for: env_safari, not env_chromium.
+// krimium: Chromium's network layer, run by WebKit (WebKitGTK). WebKit's
+// user agent says Safari, but lists mark as env_safari what Safari's own
+// content blocker can do: krimium can do what uBO on Chromium does, so lists
+// see env_chromium.
 
-vAPI.webextFlavor.soup.delete('chromium');
-vAPI.webextFlavor.soup.add('safari').add('krimium');
+vAPI.webextFlavor.soup.delete('safari');
+vAPI.webextFlavor.soup.add('chromium').add('krimium');
 
 /******************************************************************************/
 

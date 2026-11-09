@@ -26,7 +26,9 @@
 // krimium calls in through `self.krimium`:
 //   - request(): every network request of every page, before it leaves,
 //     answered at once: '' (let it go), 'c' (cancel) or 'r URL' (redirect);
-//   - tab*(), navigating(), committed(), loaded(): what its tabs do.
+//   - tab*(), navigating(), committed(), loaded(), frame(): what its tabs
+//     do;
+//   - port(): what uBO's content scripts in a page post to it.
 // This page calls out to krimium with `native()`, a message that krimium
 // answers.
 //
@@ -284,13 +286,14 @@ const alarmInfo = alarm => {
 
 /******************************************************************************/
 
-// Tabs, as krimium tells them. Frames are not told: a request carries its
-// page, its kind and its referrer, and frames are known from the requests
-// that load them.
+// Tabs, as krimium tells them. A frame is known first from the request that
+// loads its document, under an id of this page's own; then krimium tells
+// it, once its document is there, with WebKit's id for it, the id the
+// frame's content scripts give.
 
 const tabs = new Map();
 let activeTabId = -1;
-let nextFrameId = 1;
+let nextFrameId = 2 ** 48;
 
 const tabInfo = tab => ({
     id: tab.id,
@@ -394,6 +397,10 @@ const webRequestEvents = {
 
 let nextRequestId = 1;
 
+// uBO's content scripts, for krimium to run in every frame: its manifest's,
+// after krimium's own stand-in for the extension API there.
+let contentScripts = '';
+
 const request = (tabId, dest, method, url, referrer) => {
     const tab = tabs.get(tabId);
     const type = typeFromDest.get(dest) || 'other';
@@ -407,13 +414,19 @@ const request = (tabId, dest, method, url, referrer) => {
         parentFrameId: -1,
         timeStamp: Date.now(),
     };
+    if ( dest === 'krimium-scriptlets' ) {
+        return self.krimium.scriptlets?.(url, referrer) ?? '';
+    }
+    if ( dest === 'krimium-content' ) {
+        return contentScripts;
+    }
     if ( tab !== undefined ) {
         if ( type === 'main_frame' ) {
             details.frameId = 0;
         } else if ( type === 'sub_frame' ) {
             const parentFrameId = frameOf(tab, referrer);
             const frameId = nextFrameId++;
-            tab.frames.set(frameId, { url, parentFrameId });
+            tab.frames.set(frameId, { url, parentFrameId, early: true });
             details.frameId = frameId;
             details.parentFrameId = parentFrameId;
             if ( parentFrameId !== 0 ) {
@@ -469,10 +482,136 @@ const navigationEvents = {
     onTabReplaced: new Event(),
 };
 
+// Ports: uBO's content scripts talk to it through runtime.connect(). In a
+// page they live in a world of their own, "ubo", and krimium carries what
+// they post: port() here, and a 'port' message back to the frame.
+
+const ports = new Map();
+const onConnect = new Event();
+
+const postToFrame = (tabId, frameId, data) => {
+    native({ type: 'port', tabId, frameId, data: JSON.stringify(data) });
+};
+
+const dropPorts = (tabId, frameId) => {
+    for ( const [ key, port ] of ports ) {
+        if ( port.tabId !== tabId ) { continue; }
+        if ( frameId !== undefined && port.frameId !== frameId ) { continue; }
+        ports.delete(key);
+        port.onDisconnect.emit(port);
+    }
+};
+
+const portMessage = (tabId, frameId, url, data) => {
+    let m;
+    try { m = JSON.parse(data); } catch { return; }
+    const key = `${tabId} ${frameId} ${m.name}`;
+    if ( m.t === 'connect' ) {
+        const tab = tabs.get(tabId);
+        const port = {
+            name: m.name,
+            tabId,
+            frameId,
+            sender: {
+                tab: tab !== undefined ? tabInfo(tab) : undefined,
+                frameId,
+                url,
+                origin: originOf(url) || undefined,
+            },
+            onMessage: new Event(),
+            onDisconnect: new Event(),
+            postMessage(msg) {
+                if ( ports.get(key) !== port ) { return; }
+                postToFrame(tabId, frameId, { t: 'msg', name: m.name, msg });
+            },
+            disconnect() {
+                if ( ports.get(key) !== port ) { return; }
+                ports.delete(key);
+                postToFrame(tabId, frameId, { t: 'disconnect', name: m.name });
+            },
+        };
+        ports.set(key, port);
+        onConnect.emit(port);
+        return;
+    }
+    const port = ports.get(key);
+    if ( port === undefined ) { return; }
+    if ( m.t === 'msg' ) {
+        port.onMessage.emit(m.msg, port);
+    } else if ( m.t === 'disconnect' ) {
+        ports.delete(key);
+        port.onDisconnect.emit(port);
+    }
+};
+
+// A frame has a new document: what lived in the one before is gone.
+const frame = (tabId, frameId, parentFrameId, url) => {
+    const tab = tabs.get(tabId);
+    if ( tab === undefined ) { return; }
+    if ( frameId === 0 ) {
+        dropPorts(tabId);
+        return;
+    }
+    dropPorts(tabId, frameId);
+    for ( const [ id, early ] of tab.frames ) {
+        if ( early.early && early.url === url ) {
+            tab.frames.delete(id);
+            break;
+        }
+    }
+    tab.frames.set(frameId, { url, parentFrameId });
+    navigationEvents.onCommitted.emit({
+        tabId, frameId, parentFrameId, url,
+        transitionType: 'auto_subframe', transitionQualifiers: [],
+        timeStamp: Date.now(),
+    });
+};
+
+// Styles go in as user style sheets, to a frame, or to the frames of a
+// subframe's scheme and host: WebKit gives a sheet to frames by their
+// address.
+const styleDetails = (tabId, details) => {
+    const tab = tabs.get(tabId);
+    const frameId = details.frameId ?? 0;
+    let pattern = '';
+    if ( frameId !== 0 ) {
+        try {
+            const url = new URL(tab.frames.get(frameId).url);
+            if ( /^https?:$/.test(url.protocol) === false ) { return; }
+            pattern = `${url.protocol}//${url.hostname}/*`;
+        } catch {
+            return;
+        }
+    }
+    return { tabId, frameId, pattern, code: details.code || '' };
+};
+
+const executeScript = async (tabId, details) => {
+    if ( typeof tabId !== 'number' ) { details = tabId; tabId = activeTabId; }
+    let code = details.code;
+    if ( code === undefined && details.file !== undefined ) {
+        const r = await fetch(root + details.file.replace(/^\//, ''));
+        code = await r.text();
+    }
+    if ( typeof code !== 'string' ) { return []; }
+    const results = await native({
+        type: 'tabs.executeScript',
+        tabId,
+        frameId: details.frameId ?? 0,
+        allFrames: details.allFrames === true,
+        code,
+    });
+    try { return JSON.parse(results); } catch { return []; }
+};
+
+/******************************************************************************/
+
 // What krimium calls
 
 self.krimium = {
     request,
+    port: portMessage,
+    frame,
 
     tabCreated(details) {
         const tab = addTab(details);
@@ -500,6 +639,7 @@ self.krimium = {
     },
     tabRemoved(tabId) {
         if ( tabs.delete(tabId) === false ) { return; }
+        dropPorts(tabId);
         if ( activeTabId === tabId ) { activeTabId = -1; }
         tabsEvents.onRemoved.emit(tabId, { windowId: 1, isWindowClosing: false });
     },
@@ -617,7 +757,7 @@ self.chrome = {
         reload: ( ) => { self.location.reload(); },
         sendMessage: api(( ) => {}),
         openOptionsPage: api(( ) => {}),
-        onConnect: new Event(),
+        onConnect,
         onMessage: new Event(),
         onInstalled: new Event(),
         onStartup: new Event(),
@@ -663,10 +803,17 @@ self.chrome = {
         }),
         remove: api(tabIds => native({ type: 'tabs.remove', tabIds: [ tabIds ].flat() })),
         move: api(( ) => {}),
-        // Scripts and styles in pages: not yet (stage 2).
-        executeScript: api(( ) => []),
-        insertCSS: api(( ) => {}),
-        removeCSS: api(( ) => {}),
+        executeScript: api(executeScript),
+        insertCSS: api((tabId, details) => {
+            const style = styleDetails(tabId, details);
+            if ( style === undefined ) { return; }
+            return native({ type: 'tabs.insertCSS', ...style });
+        }),
+        removeCSS: api((tabId, details) => {
+            const style = styleDetails(tabId, details);
+            if ( style === undefined ) { return; }
+            return native({ type: 'tabs.removeCSS', ...style });
+        }),
         sendMessage: api(( ) => {}),
         ...tabsEvents,
     },
@@ -715,6 +862,13 @@ const start = async ( ) => {
         } catch {
         }
     }
+    const files = [ 'js/krimium-content.js', ...manifest.content_scripts[0].js ];
+    const scripts = await Promise.all(files.map(async file => {
+        const path = file.replace(/^\//, '');
+        const r = await fetch(root + path);
+        return [ root + path, await r.text() ];
+    }));
+    contentScripts = `s ${JSON.stringify(scripts)}`;
     const told = await native({ type: 'hello' });
     for ( const details of told || [] ) {
         addTab(details);
