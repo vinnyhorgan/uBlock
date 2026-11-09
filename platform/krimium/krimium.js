@@ -382,6 +382,7 @@ const typeFromDest = new Map([
     [ 'audio', 'media' ], [ 'video', 'media' ], [ 'track', 'media' ],
     [ 'object', 'object' ], [ 'embed', 'object' ],
     [ 'empty', 'xmlhttprequest' ],
+    [ 'ping', 'ping' ],
     [ 'report', 'csp_report' ],
 ]);
 
@@ -420,6 +421,9 @@ const request = (tabId, dest, method, url, referrer) => {
     }
     if ( dest === 'krimium-content' ) {
         return contentScripts;
+    }
+    if ( dest === 'ping' && hyperlinkAuditing === false ) {
+        return 'c';
     }
     if ( tab !== undefined ) {
         if ( type === 'main_frame' ) {
@@ -702,11 +706,20 @@ const getMessage = (name, substitutions) => {
         .replace(/\$\$/g, '$');
 };
 
-const privacySetting = value => ({
-    get: api(( ) => ({ value, levelOfControl: 'controllable_by_this_extension' })),
-    set: api(( ) => {}),
-    clear: api(( ) => {}),
-});
+// What uBO sets of the browser's privacy. Hyperlink auditing is done here:
+// when uBO turns it off, an <a ping> is cancelled (request()). WebKit does
+// the rest in the first place: it predicts nothing, and krimium has no
+// WebRTC.
+const privacySetting = (value, onChange) => {
+    const initial = value;
+    return {
+        get: api(( ) => ({ value, levelOfControl: 'controllable_by_this_extension' })),
+        set: api(details => { value = details.value; onChange?.(value); }),
+        clear: api(( ) => { value = initial; onChange?.(value); }),
+    };
+};
+
+let hyperlinkAuditing = true;
 
 self.chrome = {
     alarms: {
@@ -763,7 +776,7 @@ self.chrome = {
             webRTCIPHandlingPolicy: privacySetting('default'),
         },
         websites: {
-            hyperlinkAuditingEnabled: privacySetting(false),
+            hyperlinkAuditingEnabled: privacySetting(true, value => { hyperlinkAuditing = value; }),
         },
     },
     runtime: {
