@@ -76,6 +76,11 @@ const post = data => {
 bridge.receive = data => {
     let m;
     try { m = JSON.parse(data); } catch { return; }
+    if ( m.t === 'connect' ) {
+        if ( ports.has(m.name) ) { return; }
+        chrome.runtime.onConnect.emit(makePort(m.name));
+        return;
+    }
     const port = ports.get(m.name);
     if ( port === undefined ) { return; }
     if ( m.t === 'msg' ) {
@@ -86,8 +91,16 @@ bridge.receive = data => {
     }
 };
 
-const connect = (details = {}) => {
+// A port, at this end. From one of uBO's pages, tabs.connect() opens one
+// to a content script in a tab; uBO's background page carries it.
+const connect = (details = {}, to = {}) => {
     const name = details.name || '';
+    const port = makePort(name);
+    post({ t: 'connect', name, ...to });
+    return port;
+};
+
+const makePort = name => {
     const port = {
         name,
         onMessage: new Event(),
@@ -105,7 +118,6 @@ const connect = (details = {}) => {
         },
     };
     ports.set(name, port);
-    post({ t: 'connect', name });
     return port;
 };
 
@@ -142,6 +154,7 @@ const chrome = self.chrome = self.browser = {
         id: 'krimium-ubo',
         lastError: undefined,
         connect,
+        onConnect: new Event(),
         getManifest: ( ) => manifest,
         getURL: path => `krimium-ubo://ubo/${String(path).replace(/^\//, '')}`,
     },
@@ -163,6 +176,18 @@ if ( bridge.page ) {
         websites: { hyperlinkAuditingEnabled: {} },
     };
     chrome.webRequest = { MAX_HANDLER_BEHAVIOR_CHANGED_CALLS_PER_10_MINUTES: 20 };
+    let tabPorts = 0;
+    chrome.tabs.connect = (tabId, details = {}) => connect(
+        { name: `tabs.connect ${Date.now()} ${++tabPorts}` },
+        { tabId, frameId: details.frameId ?? 0 }
+    );
+    // uBO's background page tells of the tabs' navigation.
+    const onDOMContentLoaded = new Event();
+    chrome.webNavigation.onDOMContentLoaded = onDOMContentLoaded;
+    new BroadcastChannel('krimium').onmessage = ev => {
+        const { what, details } = ev.data || {};
+        if ( what === 'DOMContentLoaded' ) { onDOMContentLoaded.emit(details); }
+    };
 }
 
 })();

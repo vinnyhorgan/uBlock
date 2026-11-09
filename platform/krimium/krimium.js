@@ -584,6 +584,21 @@ const postToFrame = (tabId, frameId, data) => {
     native({ type: 'port', tabId, frameId, data: JSON.stringify(data) });
 };
 
+// A port one of uBO's pages opens to a tab's content script, with
+// tabs.connect() (the logger's DOM inspector): both ends are in pages, and
+// what one end posts goes on to the other.
+const relays = new Map();
+
+const relay = (key, m) => {
+    const other = relays.get(key);
+    if ( other === undefined ) { return; }
+    if ( m.t === 'disconnect' ) {
+        relays.delete(key);
+        relays.delete(other.key);
+    }
+    postToFrame(other.tabId, other.frameId, { t: m.t, name: other.name, msg: m.msg });
+};
+
 const dropPorts = (tabId, frameId) => {
     for ( const [ key, port ] of ports ) {
         if ( port.tabId !== tabId ) { continue; }
@@ -591,12 +606,30 @@ const dropPorts = (tabId, frameId) => {
         ports.delete(key);
         port.onDisconnect.emit(port);
     }
+    for ( const [ key, end ] of relays ) {
+        if ( end.from.tabId !== tabId ) { continue; }
+        if ( frameId !== undefined && end.from.frameId !== frameId ) { continue; }
+        relay(key, { t: 'disconnect' });
+    }
 };
 
 const portMessage = (tabId, frameId, url, data) => {
     let m;
     try { m = JSON.parse(data); } catch { return; }
     const key = `${tabId} ${frameId} ${m.name}`;
+    if ( m.t === 'connect' && m.tabId !== undefined ) {
+        const to = { tabId: m.tabId, frameId: m.frameId ?? 0, name: m.name };
+        to.key = `${to.tabId} ${to.frameId} ${to.name}`;
+        const from = { tabId, frameId, name: m.name, key };
+        relays.set(key, { ...to, from });
+        relays.set(to.key, { ...from, from: to });
+        postToFrame(to.tabId, to.frameId, { t: 'connect', name: m.name });
+        return;
+    }
+    if ( relays.has(key) ) {
+        relay(key, m);
+        return;
+    }
     if ( m.t === 'connect' ) {
         const tab = tabs.get(tabId);
         const port = {
@@ -636,6 +669,10 @@ const portMessage = (tabId, frameId, url, data) => {
 };
 
 let krimiumPort;
+
+// uBO's pages hear of the tabs' navigation here: the logger, to put its
+// DOM inspector back in a page that loaded again.
+const pages = new BroadcastChannel('krimium');
 
 // The main frame has a new document. krimium's module in the page's process
 // says so first, on the way the page's requests come, before any of them:
@@ -800,6 +837,7 @@ self.krimium = {
         const details = { tabId, frameId: 0, parentFrameId: -1, url: tab.url, timeStamp: Date.now() };
         navigationEvents.onDOMContentLoaded.emit(details);
         navigationEvents.onCompleted.emit(details);
+        pages.postMessage({ what: 'DOMContentLoaded', details });
         tabsEvents.onUpdated.emit(tabId, { status: 'complete' }, tabInfo(tab));
     },
 };

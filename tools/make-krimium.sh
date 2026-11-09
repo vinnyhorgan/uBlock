@@ -25,6 +25,10 @@ cp platform/krimium/*.js    $DES/js/
 cp platform/krimium/*.html  $DES/
 cp platform/krimium/*.json  $DES/
 
+# The logger's DOM inspector waits for the logger: see krimium-logger.js.
+sed -i 's#<script src="js/logger-ui-inspector.js" type="module"></script>#<script src="js/krimium-logger.js" type="module"></script>#' $DES/logger-ui.html
+grep -q 'js/krimium-logger.js' $DES/logger-ui.html
+
 echo "*** uBlock0.krimium: Generating meta..."
 python3 tools/make-chromium-meta.py $DES/
 
