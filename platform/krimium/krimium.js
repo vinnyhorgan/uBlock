@@ -403,6 +403,7 @@ const resourceTypes = {
     OBJECT: 'object',
     XMLHTTPREQUEST: 'xmlhttprequest',
     PING: 'ping',
+    BEACON: 'beacon',
     CSP_REPORT: 'csp_report',
     MEDIA: 'media',
     OTHER: 'other',
@@ -419,7 +420,7 @@ const typeFromDest = new Map([
     [ 'audio', 'media' ], [ 'video', 'media' ], [ 'track', 'media' ],
     [ 'object', 'object' ], [ 'embed', 'object' ],
     [ 'empty', 'xmlhttprequest' ],
-    [ 'ping', 'ping' ],
+    [ 'ping', 'ping' ], [ 'beacon', 'beacon' ],
     [ 'report', 'csp_report' ],
 ]);
 
