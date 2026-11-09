@@ -517,6 +517,42 @@ const verdict = results => {
 
 /******************************************************************************/
 
+// The right-click menu: uBO's entries, which krimium adds to the menu a page
+// shows when they apply, as Chromium does; what was right-clicked comes back
+// with the one chosen.
+
+const menuEntries = new Map();
+const onMenuClicked = new Event();
+let menusPending = false;
+
+const menusChanged = ( ) => {
+    if ( menusPending ) { return; }
+    menusPending = true;
+    Promise.resolve().then(( ) => {
+        menusPending = false;
+        native({
+            type: 'menus',
+            entries: Array.from(menuEntries.values()).map(entry => ({
+                id: entry.id,
+                title: entry.title,
+                contexts: (entry.contexts || [ 'page' ]).join(' '),
+                documentUrlPatterns: (entry.documentUrlPatterns || []).join(' '),
+                targetUrlPatterns: (entry.targetUrlPatterns || []).join(' '),
+            })),
+        });
+    });
+};
+
+const menuClicked = (tabId, menuItemId, details) => {
+    const tab = tabs.get(tabId);
+    if ( tab === undefined ) { return; }
+    let info;
+    try { info = JSON.parse(details); } catch { return; }
+    onMenuClicked.emit({ ...info, menuItemId, pageUrl: tab.url }, tabInfo(tab));
+};
+
+/******************************************************************************/
+
 const tabsEvents = {
     onCreated: new Event(),
     onUpdated: new Event(),
@@ -685,6 +721,7 @@ const executeScript = async (tabId, details) => {
 
 self.krimium = {
     request,
+    menuClicked,
     port: portMessage,
     frame,
     // A page that is no tab (uBO's popup) went away.
@@ -832,10 +869,23 @@ self.chrome = {
         onCommand: new Event(),
     },
     contextMenus: {
-        create: ( ) => {},
-        remove: api(( ) => {}),
-        removeAll: api(( ) => {}),
-        onClicked: new Event(),
+        create: entry => {
+            menuEntries.set(entry.id, entry);
+            menusChanged();
+            return entry.id;
+        },
+        // At once, in the order uBO calls them, as Chromium has them.
+        remove: (id, ...rest) => {
+            menuEntries.delete(id);
+            menusChanged();
+            return api(( ) => {})(...rest);
+        },
+        removeAll: (...rest) => {
+            menuEntries.clear();
+            menusChanged();
+            return api(( ) => {})(...rest);
+        },
+        onClicked: onMenuClicked,
     },
     // As Firefox has it: krimium resolves the name.
     dns: {
