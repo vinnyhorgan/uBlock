@@ -96,10 +96,14 @@ vAPI.Tabs = class extends vAPI.Tabs {
 /******************************************************************************/
 
 {
+    // krimium: on plain http WebKit does not say what a request is for, and
+    // krimium can tell only some kinds (navigations, style sheets, images):
+    // the others come as 'other', scripts among them, hence 'js' here.
     const extToTypeMap = new Map([
         ['eot','font'],['otf','font'],['ttf','font'],['woff','font'],['woff2','font'],
         ['mp3','media'],['mp4','media'],['webm','media'],
-        ['gif','image'],['ico','image'],['jpeg','image'],['jpg','image'],['png','image'],['svg','image'],['webp','image']
+        ['gif','image'],['ico','image'],['jpeg','image'],['jpg','image'],['png','image'],['svg','image'],['webp','image'],
+        ['js','script'],['mjs','script'],
     ]);
 
     const parsedURL = new URL('https://www.example.org/');

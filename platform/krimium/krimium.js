@@ -406,6 +406,7 @@ const resourceTypes = {
     BEACON: 'beacon',
     CSP_REPORT: 'csp_report',
     MEDIA: 'media',
+    WEBSOCKET: 'websocket',
     OTHER: 'other',
 };
 
@@ -422,6 +423,8 @@ const typeFromDest = new Map([
     [ 'empty', 'xmlhttprequest' ],
     [ 'ping', 'ping' ], [ 'beacon', 'beacon' ],
     [ 'report', 'csp_report' ],
+    // not Fetch's word: krimium asks before a page's WebSocket is made
+    [ 'websocket', 'websocket' ],
 ]);
 
 const webRequestEvents = {
