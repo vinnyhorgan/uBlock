@@ -60,10 +60,13 @@ const native = msg => {
 let lastError;
 
 // A function of the API: answers through a promise, and through a callback
-// when given one, the way chrome.* does.
+// when given one, the way chrome.* does. It reads what it is given at once,
+// as chrome.* does: uBO gives insertCSS() one object twice, its code changed
+// in between (the styles it remembers for a site, then those for what it
+// blocked there).
 const api = fn => function(...args) {
     const callback = typeof args.at(-1) === 'function' ? args.pop() : undefined;
-    const promise = Promise.resolve().then(( ) => fn(...args));
+    const promise = new Promise(resolve => { resolve(fn(...args)); });
     if ( callback === undefined ) { return promise; }
     promise.then(result => {
         callback(result);
